@@ -1,14 +1,15 @@
-# app.py (ФИНАЛЬНАЯ ВЕРСИЯ - Добавлена кнопка "Выход")
+# app.py (ФИНАЛЬНАЯ ВЕРСИЯ - Карта Pydeck и Динамические фильтры)
 
 import streamlit as st
 import pandas as pd
 import os
 import io
+import pydeck as pdk # <-- Импортируем Pydeck для карты
 
 # --- НАСТРОЙКИ ---
 DATA_FILE = "data.parquet" 
-ADMIN_PASSWORD = "ooh_dashboard_admin_123" 
-USER_PASSWORD = "user_123"
+ADMIN_PASSWORD = "your_secret_admin_password" 
+USER_PASSWORD = "your_user_password"
 
 # --- ОБЩИЕ НАСТРОЙКИ СТРАНИЦЫ ---
 st.set_page_config(
@@ -17,40 +18,18 @@ st.set_page_config(
     page_icon="https://emojigraph.org/media/google/chart-increasing_1f4c8.png"
 )
 
-# --- CSS СТИЛИ ---
+# --- CSS СТИЛИ (без изменений) ---
 st.markdown("""
 <style>
-    /* Общие отступы */
-    .block-container {
-        padding-top: 2rem; padding-bottom: 2rem;
-        padding-left: 5rem; padding-right: 5rem;
-    }
-    /* Стиль для карточек */
-    .card {
-        background-color: #FFFFFF;
-        border-radius: 10px;
-        padding: 20px;
-        box-shadow: 0 4px 8px 0 rgba(0,0,0,0.05);
-        border: 1px solid #E6E6E6;
-        height: 100%;
-    }
-    /* Убираем лишний отступ у заголовка внутри карточки */
-    .card h3 {
-        margin-top: 0;
-    }
-    /* Стиль для KPI-карточек */
+    .block-container { padding-top: 2rem; padding-bottom: 2rem; padding-left: 5rem; padding-right: 5rem; }
+    .card { background-color: #FFFFFF; border-radius: 10px; padding: 20px; box-shadow: 0 4px 8px 0 rgba(0,0,0,0.05); border: 1px solid #E6E6E6; height: 100%; }
+    .card h3 { margin-top: 0; }
     .kpi-card { display: flex; align-items: center; }
-    .kpi-icon {
-        font-size: 2rem; padding: 20px;
-        border-radius: 50%; color: white;
-        margin-right: 20px;
-    }
+    .kpi-icon { font-size: 2rem; padding: 20px; border-radius: 50%; color: white; margin-right: 20px; }
     .kpi-text { text-align: left; }
     .kpi-value { font-size: 2.2rem; font-weight: bold; }
     .kpi-title { font-size: 0.9rem; color: grey; }
-    /* Стиль для кнопок в хедере */
     div[data-testid="stToolbar"] { display: flex; gap: 1rem; width: 100%; }
-    /* Скрываем стандартные элементы Streamlit */
     header, #MainMenu, footer { visibility: hidden; }
 </style>
 """, unsafe_allow_html=True)
@@ -64,11 +43,13 @@ def process_uploaded_file(uploaded_file):
     try:
         df = pd.read_excel(uploaded_file)
         df.rename(columns={'Город': 'city', 'Формат поверхности2': 'format', 'Продавец': 'seller', 'surface_id': 'surface_id', 'Номер кс': 'surface_id', 'Номер конструкции': 'surface_id', 'GRP (18+)': 'grp', 'GRP (18+) в сутки': 'grp', 'OTS (18+)': 'ots', 'OTS (18+) тыс.чел. в сутки': 'ots', 'Широта': 'lat', 'Долгота': 'lon'}, inplace=True, errors='ignore')
-        required_columns = ['surface_id', 'grp', 'ots', 'city', 'format', 'seller']
+        required_columns = ['surface_id', 'grp', 'ots', 'city', 'format', 'seller', 'lat', 'lon']
         for col in required_columns:
             if col not in df.columns: raise KeyError(f"В файле отсутствует столбец '{col}'.")
         for col in ['city', 'format', 'seller']: df[col] = df[col].astype(str)
-        df.dropna(subset=['city', 'format'], inplace=True)
+        # Убедимся, что координаты - числовые
+        for col in ['lat', 'lon']: df[col] = pd.to_numeric(df[col], errors='coerce')
+        df.dropna(subset=['city', 'format', 'lat', 'lon'], inplace=True)
         return df
     except Exception as e:
         st.error(f"Ошибка при чтении файла: {e}"); return None
@@ -110,15 +91,9 @@ else:
                     new_df = process_uploaded_file(uploaded_file)
                     if new_df is not None: new_df.to_parquet(DATA_FILE, index=False); st.cache_data.clear(); st.success("Файл обновлен!"); st.rerun()
             st.markdown('</div>', unsafe_allow_html=True)
-            
-    # --- ДОБАВЛЕН БЛОК С КНОПКОЙ ВЫХОДА ---
     with user_col:
         st.markdown(f"**{st.session_state.role.upper()}**")
-        if st.button("Выход"):
-            st.session_state.authenticated = False
-            st.session_state.role = None
-            st.rerun()
-            
+        if st.button("Выход"): st.session_state.authenticated = False; st.session_state.role = None; st.rerun()
     st.markdown("---")
     
     # --- ОСНОВНОЙ ИНТЕРФЕЙС ---
@@ -128,29 +103,42 @@ else:
         df = load_data(DATA_FILE)
         
         main_cols = st.columns([1, 3])
-        with main_cols[0]: # КОЛОНКА С ФИЛЬТРАМИ
+        with main_cols[0]: # --- КОЛОНКА С ФИЛЬТРАМИ ---
             with st.container():
                 st.markdown("<div class='card'>", unsafe_allow_html=True)
                 st.subheader("Фильтры")
-                selected_city = st.selectbox("Город", options=["Все города"] + sorted(list(df['city'].unique())), label_visibility="collapsed")
-                selected_seller = st.selectbox("Продавец", options=["Все продавцы"] + sorted(list(df['seller'].unique())), label_visibility="collapsed")
+                
+                # ИЗМЕНЕНИЕ: ЛОГИКА ДИНАМИЧЕСКИХ ФИЛЬТРОВ
+                city_options = ["Все города"] + sorted(list(df['city'].unique()))
+                selected_city = st.selectbox("Город", options=city_options, label_visibility="collapsed")
+
+                # Фильтруем данные ПОСЛЕ выбора города для следующих фильтров
+                if selected_city == "Все города":
+                    df_for_filters = df
+                else:
+                    df_for_filters = df[df['city'] == selected_city]
+                
+                seller_options = ["Все продавцы"] + sorted(list(df_for_filters['seller'].unique()))
+                selected_seller = st.selectbox("Продавец", options=seller_options, label_visibility="collapsed")
+                
                 st.markdown("##### Форматы поверхностей")
-                all_formats = sorted(df['format'].unique())
+                format_options = sorted(df_for_filters['format'].unique())
                 select_all_formats = st.checkbox("Выбрать все форматы", value=True)
                 selected_formats = []
-                for fmt in all_formats:
-                    is_checked = st.checkbox(fmt, value=select_all_formats, key=f"fmt_{fmt}")
-                    if is_checked:
+                for fmt in format_options:
+                    if st.checkbox(fmt, value=select_all_formats, key=f"fmt_{fmt}"):
                         selected_formats.append(fmt)
-                if not selected_formats and not select_all_formats: st.info("Выберите хотя бы один формат.")
-                elif not selected_formats and select_all_formats: selected_formats = all_formats
+                if not selected_formats:
+                    selected_formats = format_options if select_all_formats else []
+
                 st.markdown("</div>", unsafe_allow_html=True)
 
-        with main_cols[1]: # КОЛОНКА С КОНТЕНТОМ
+        with main_cols[1]: # --- КОЛОНКА С КОНТЕНТОМ ---
             df_filtered = df.copy()
             if selected_city != "Все города": df_filtered = df_filtered[df_filtered['city'] == selected_city]
             if selected_seller != "Все продавцы": df_filtered = df_filtered[df_filtered['seller'] == selected_seller]
             if selected_formats: df_filtered = df_filtered[df_filtered['format'].isin(selected_formats)]
+            else: df_filtered = pd.DataFrame() # Если ни один формат не выбран, показываем пустой результат
             
             if df_filtered.empty:
                 st.warning("Нет данных, соответствующих выбранным фильтрам.")
@@ -169,11 +157,20 @@ else:
                     excel_data = to_excel(summary_table); export_button_placeholder.download_button("Экспорт в Excel", data=excel_data, file_name="ooh_analytics_report.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
                     st.dataframe(summary_table, use_container_width=True)
                     
+                    # ИЗМЕНЕНИЕ: Используем Pydeck для карты с маленькими точками
                     st.subheader("Карта поверхностей")
-                    df_map = df_filtered.dropna(subset=['lat', 'lon'])
-                    df_map['lat'] = pd.to_numeric(df_map['lat'], errors='coerce')
-                    df_map['lon'] = pd.to_numeric(df_map['lon'], errors='coerce')
-                    df_map.dropna(subset=['lat', 'lon'], inplace=True)
-                    if not df_map.empty: st.map(df_map)
-                    else: st.info("Нет данных с координатами для отображения на карте.")
+                    view_state = pdk.ViewState(
+                        latitude=df_filtered['lat'].mean(),
+                        longitude=df_filtered['lon'].mean(),
+                        zoom=10,
+                        pitch=0)
+                    layer = pdk.Layer(
+                        'ScatterplotLayer',
+                        data=df_filtered[['lon', 'lat']],
+                        get_position='[lon, lat]',
+                        get_color='[200, 30, 0, 160]',
+                        get_radius=15,  # <-- РАДИУС ТОЧЕК В МЕТРАХ. МОЖНО ИЗМЕНИТЬ!
+                        pickable=True
+                    )
+                    st.pydeck_chart(pdk.Deck(layers=[layer], initial_view_state=view_state, map_style='mapbox://styles/mapbox/light-v9'))
                     st.markdown("</div>", unsafe_allow_html=True)
