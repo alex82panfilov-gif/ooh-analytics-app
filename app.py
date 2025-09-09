@@ -1,10 +1,10 @@
-# app.py (ФИНАЛЬНАЯ ВЕРСИЯ - Карта Pydeck и Динамические фильтры)
+# app.py (ФИНАЛЬНАЯ ВЕРСИЯ - Возвращена стандартная карта st.map)
 
 import streamlit as st
 import pandas as pd
 import os
 import io
-import pydeck as pdk # <-- Импортируем Pydeck для карты
+# import pydeck as pdk <-- УБРАЛИ ЭТУ СТРОКУ
 
 # --- НАСТРОЙКИ ---
 DATA_FILE = "data.parquet" 
@@ -47,7 +47,6 @@ def process_uploaded_file(uploaded_file):
         for col in required_columns:
             if col not in df.columns: raise KeyError(f"В файле отсутствует столбец '{col}'.")
         for col in ['city', 'format', 'seller']: df[col] = df[col].astype(str)
-        # Убедимся, что координаты - числовые
         for col in ['lat', 'lon']: df[col] = pd.to_numeric(df[col], errors='coerce')
         df.dropna(subset=['city', 'format', 'lat', 'lon'], inplace=True)
         return df
@@ -60,7 +59,7 @@ def to_excel(df):
         df.to_excel(writer, index=False, sheet_name='Report')
     return output.getvalue()
 
-# --- СИСТЕМА АУТЕНТИФИКАЦИИ ---
+# --- СИСТЕМА АУТЕНТИФИКАЦИИ (без изменений) ---
 if 'authenticated' not in st.session_state: st.session_state.authenticated = False
 if 'role' not in st.session_state: st.session_state.role = None
 
@@ -77,7 +76,7 @@ def login():
 if not st.session_state.authenticated:
     login()
 else:
-    # --- ХЕДЕР ---
+    # --- ХЕДЕР (без изменений) ---
     logo_col, title_col, controls_col, user_col = st.columns([1, 4, 3, 1])
     with logo_col: st.image("https://emojigraph.org/media/google/chart-increasing_1f4c8.png", width=60)
     with title_col: st.markdown("### OOH Analytics\n*Аналитика наружной рекламы*")
@@ -96,31 +95,20 @@ else:
         if st.button("Выход"): st.session_state.authenticated = False; st.session_state.role = None; st.rerun()
     st.markdown("---")
     
-    # --- ОСНОВНОЙ ИНТЕРФЕЙС ---
+    # --- ОСНОВНОЙ ИНТЕРФЕЙС (изменения только в блоке карты) ---
     if not os.path.exists(DATA_FILE):
         st.info("Данные еще не загружены. Пожалуйста, попросите администратора загрузить файл.")
     else:
         df = load_data(DATA_FILE)
         
         main_cols = st.columns([1, 3])
-        with main_cols[0]: # --- КОЛОНКА С ФИЛЬТРАМИ ---
+        with main_cols[0]: # КОЛОНКА С ФИЛЬТРАМИ (без изменений)
             with st.container():
                 st.markdown("<div class='card'>", unsafe_allow_html=True)
                 st.subheader("Фильтры")
-                
-                # ИЗМЕНЕНИЕ: ЛОГИКА ДИНАМИЧЕСКИХ ФИЛЬТРОВ
-                city_options = ["Все города"] + sorted(list(df['city'].unique()))
-                selected_city = st.selectbox("Город", options=city_options, label_visibility="collapsed")
-
-                # Фильтруем данные ПОСЛЕ выбора города для следующих фильтров
-                if selected_city == "Все города":
-                    df_for_filters = df
-                else:
-                    df_for_filters = df[df['city'] == selected_city]
-                
-                seller_options = ["Все продавцы"] + sorted(list(df_for_filters['seller'].unique()))
-                selected_seller = st.selectbox("Продавец", options=seller_options, label_visibility="collapsed")
-                
+                selected_city = st.selectbox("Город", options=["Все города"] + sorted(list(df['city'].unique())), label_visibility="collapsed")
+                df_for_filters = df if selected_city == "Все города" else df[df['city'] == selected_city]
+                selected_seller = st.selectbox("Продавец", options=["Все продавцы"] + sorted(list(df_for_filters['seller'].unique())), label_visibility="collapsed")
                 st.markdown("##### Форматы поверхностей")
                 format_options = sorted(df_for_filters['format'].unique())
                 select_all_formats = st.checkbox("Выбрать все форматы", value=True)
@@ -128,17 +116,15 @@ else:
                 for fmt in format_options:
                     if st.checkbox(fmt, value=select_all_formats, key=f"fmt_{fmt}"):
                         selected_formats.append(fmt)
-                if not selected_formats:
-                    selected_formats = format_options if select_all_formats else []
-
+                if not selected_formats: selected_formats = format_options if select_all_formats else []
                 st.markdown("</div>", unsafe_allow_html=True)
 
-        with main_cols[1]: # --- КОЛОНКА С КОНТЕНТОМ ---
+        with main_cols[1]: # КОЛОНКА С КОНТЕНТОМ
             df_filtered = df.copy()
             if selected_city != "Все города": df_filtered = df_filtered[df_filtered['city'] == selected_city]
             if selected_seller != "Все продавцы": df_filtered = df_filtered[df_filtered['seller'] == selected_seller]
             if selected_formats: df_filtered = df_filtered[df_filtered['format'].isin(selected_formats)]
-            else: df_filtered = pd.DataFrame() # Если ни один формат не выбран, показываем пустой результат
+            else: df_filtered = pd.DataFrame()
             
             if df_filtered.empty:
                 st.warning("Нет данных, соответствующих выбранным фильтрам.")
@@ -157,20 +143,14 @@ else:
                     excel_data = to_excel(summary_table); export_button_placeholder.download_button("Экспорт в Excel", data=excel_data, file_name="ooh_analytics_report.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
                     st.dataframe(summary_table, use_container_width=True)
                     
-                    # ИЗМЕНЕНИЕ: Используем Pydeck для карты с маленькими точками
+                    # ИЗМЕНЕНО: ВОЗВРАЩЕНА СТАНДАРТНАЯ КАРТА ST.MAP
                     st.subheader("Карта поверхностей")
-                    view_state = pdk.ViewState(
-                        latitude=df_filtered['lat'].mean(),
-                        longitude=df_filtered['lon'].mean(),
-                        zoom=10,
-                        pitch=0)
-                    layer = pdk.Layer(
-                        'ScatterplotLayer',
-                        data=df_filtered[['lon', 'lat']],
-                        get_position='[lon, lat]',
-                        get_color='[200, 30, 0, 160]',
-                        get_radius=15,  # <-- РАДИУС ТОЧЕК В МЕТРАХ. МОЖНО ИЗМЕНИТЬ!
-                        pickable=True
-                    )
-                    st.pydeck_chart(pdk.Deck(layers=[layer], initial_view_state=view_state, map_style='mapbox://styles/mapbox/light-v9'))
+                    df_map = df_filtered[['lon', 'lat']].copy()
+                    df_map.dropna(inplace=True)
+
+                    if not df_map.empty:
+                        st.map(df_map) # Просто, бесплатно, без ключей, но с большими точками
+                    else:
+                        st.info("Нет данных с координатами для отображения на карте.")
+                        
                     st.markdown("</div>", unsafe_allow_html=True)
