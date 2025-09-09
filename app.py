@@ -8,8 +8,8 @@ import pydeck as pdk # <-- Импортируем Pydeck для карты
 
 # --- НАСТРОЙКИ ---
 DATA_FILE = "data.parquet" 
-ADMIN_PASSWORD = "your_secret_admin_password" 
-USER_PASSWORD = "your_user_password"
+ADMIN_PASSWORD = "ooh_dashboard_admin_123" 
+USER_PASSWORD = "user_123"
 
 # --- ОБЩИЕ НАСТРОЙКИ СТРАНИЦЫ ---
 st.set_page_config(
